@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -15,10 +16,10 @@ import (
 	"nhooyr.io/websocket"
 )
 
-const (
-	addr      = "wss://chat.strims.gg/ws"
-	triviaURL = "https://opentdb.com/api.php?amount=10"
-)
+const addr = "wss://chat.strims.gg/ws"
+
+// TODO: query param
+var triviaURL = "https://opentdb.com/api.php?amount=10&difficulty=easy"
 
 type response struct {
 	ResponseCode int      `json:"response_code"`
@@ -35,7 +36,6 @@ type result struct {
 }
 
 func main() {
-	// chattersPlaying := []string{}
 	inProgress := false
 
 	triviaClient := http.Client{Timeout: time.Second * 2}
@@ -47,6 +47,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if err := requestToken(); err != nil {
+		panic(err)
+	}
 
 	c, _, err := websocket.Dial(ctx, addr,
 		&websocket.DialOptions{
@@ -74,10 +78,12 @@ func main() {
 			}
 			chatMsg := content["data"].(string)
 			if strings.HasPrefix(chatMsg, "!trivia") && !inProgress {
+				// check if msg contains category
+
 				fmt.Println("Starting trivia round")
 				inProgress = true
 				fmt.Println("Requesting data")
-				q, err := requestData(ctx, &triviaClient)
+				q, err := requestTriviaData(ctx, &triviaClient)
 				if err != nil {
 					panic(err)
 				}
@@ -107,9 +113,6 @@ func main() {
 				if err = sendMessage(ctx, c, z); err != nil {
 					panic(err)
 				}
-
-				inProgress = false
-				time.Sleep(1 * time.Minute)
 			}
 		}
 	}
@@ -127,7 +130,42 @@ func sendMessage(ctx context.Context, c *websocket.Conn, input string) error {
 	return nil
 }
 
-func requestData(ctx context.Context, client *http.Client) (*result, error) {
+func requestToken() error {
+	// TODO: query param
+	resp, err := http.Get("https://opentdb.com/api_token.php?command=request")
+	if err != nil {
+		return err
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	tokenRes := struct {
+		Token string `json:"token"`
+	}{}
+	if err = json.Unmarshal(body, &tokenRes); err != nil {
+		return err
+	}
+
+	u, err := url.Parse(triviaURL)
+	if err != nil {
+		return err
+	}
+
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return err
+	}
+
+	q.Add("token", tokenRes.Token)
+	u.RawQuery = q.Encode()
+	triviaURL = u.String()
+	return nil
+}
+
+func requestTriviaData(ctx context.Context, client *http.Client) (*result, error) {
 	req, err := http.NewRequest(http.MethodGet, triviaURL, nil)
 	if err != nil {
 		return nil, err
@@ -136,7 +174,6 @@ func requestData(ctx context.Context, client *http.Client) (*result, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
