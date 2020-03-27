@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +21,9 @@ import (
 const addr = "wss://chat.strims.gg/ws"
 
 // TODO: query param
-var triviaURL = "https://opentdb.com/api.php?amount=10&difficulty=easy"
+var (
+	triviaURL = "https://opentdb.com/api.php?amount=10"
+)
 
 type response struct {
 	ResponseCode int      `json:"response_code"`
@@ -36,7 +40,11 @@ type result struct {
 }
 
 func main() {
+	var current *result
+	var correct int
 	inProgress := false
+	timeup := false
+	players := map[string]int{}
 
 	triviaClient := http.Client{Timeout: time.Second * 2}
 
@@ -79,27 +87,32 @@ func main() {
 			chatMsg := content["data"].(string)
 			if strings.HasPrefix(chatMsg, "!trivia") && !inProgress {
 				// check if msg contains category
-
 				fmt.Println("Starting trivia round")
 				inProgress = true
 				fmt.Println("Requesting data")
-				q, err := requestTriviaData(ctx, &triviaClient)
+				current, err = requestTriviaData(ctx, &triviaClient)
 				if err != nil {
 					panic(err)
 				}
-				answers := []string{q.CorrectAnswer}
-				answers = append(answers, q.IncorrectAnswers...)
+				answers := []string{current.CorrectAnswer}
+				answers = append(answers, current.IncorrectAnswers...)
 
 				var out string
 				for i, ans := range answers {
-					out += fmt.Sprintf("`%d` %s ", i+1, strings.ReplaceAll(ans, "\"", "'"))
+					out += fmt.Sprintf("`%d` %s ", i+1, strings.ReplaceAll(html.UnescapeString(ans), "\"", "'"))
+				}
+
+				for i, a := range answers {
+					if a == current.CorrectAnswer {
+						correct = i + 1
+					}
 				}
 
 				rand.Seed(time.Now().UnixNano())
 				rand.Shuffle(len(answers), func(i, j int) { answers[i], answers[j] = answers[j], answers[i] })
 				x := fmt.Sprintf(
-					"Trivia time! (%s) Question: `%s`... Possible answers: %s (answer in 20s)",
-					q.Category, strings.Replace(html.UnescapeString(q.Question), "\"", "'", -1),
+					"Trivia time! (%s) Question: `%s`... Possible answers: %s (answer in 20s, whisper me the number)",
+					current.Category, strings.Replace(html.UnescapeString(current.Question), "\"", "'", -1),
 					out,
 				)
 
@@ -107,13 +120,52 @@ func main() {
 				if err = sendMessage(ctx, c, initialQuestion); err != nil {
 					panic(err)
 				}
+				go func() {
+					time.Sleep(20 * time.Second)
+					inProgress = false
+					timeup = true
+				}()
+			}
+		} else if msg[0] == "PRIVMSG" && inProgress {
+			if err = json.Unmarshal([]byte(msg[1]), &content); err != nil {
+				panic(err)
+			}
+			user := content["nick"].(string)
+			ans, err := strconv.ParseInt(content["data"].(string), 0, 32)
+			if err != nil {
+				out := fmt.Sprintf(`PRIVMSG {"data": "Could not determine answer", "nick": %q}`, user)
+				if err = sendMessage(ctx, c, out); err != nil {
+					panic(err)
+				}
+			} else {
+				fmt.Printf("%s is playing with %d\n", user, ans)
+				players[user] = int(ans)
+			}
+		}
 
-				time.Sleep(20 * time.Second)
-				z := fmt.Sprintf(`MSG {"data": "The correct answer is: %s"}`, q.CorrectAnswer)
-				if err = sendMessage(ctx, c, z); err != nil {
+		if timeup {
+			fmt.Println("Determining winner...")
+			out := fmt.Sprintf(`MSG {"data": "The correct answer is: %d %s.`, correct, current.CorrectAnswer)
+			plus := ` No one answered correctly"}`
+			if len(players) > 0 {
+				for user, ans := range players {
+					if ans == correct {
+						plus := fmt.Sprintf(`%s won this round"}`, user)
+						if err = sendMessage(ctx, c, out+plus); err != nil {
+							panic(err)
+						}
+						break
+					}
+				}
+				if err = sendMessage(ctx, c, out+plus); err != nil {
+					panic(err)
+				}
+			} else {
+				if err = sendMessage(ctx, c, out+plus); err != nil {
 					panic(err)
 				}
 			}
+			timeup = false
 		}
 	}
 }
@@ -181,6 +233,18 @@ func requestTriviaData(ctx context.Context, client *http.Client) (*result, error
 	responseData := response{}
 	if err = json.Unmarshal(body, &responseData); err != nil {
 		return nil, err
+	}
+
+	r, err := regexp.Compile("19[0-9]\\d{1}")
+	if err != nil {
+		return nil, err
+	}
+
+	for i, trivia := range responseData.Results {
+		if r.MatchString(trivia.Question) && trivia.Category == "Entertainment: Music" {
+			responseData.Results[i] = responseData.Results[0]
+			responseData.Results = responseData.Results[1:]
+		}
 	}
 
 	return &responseData.Results[rand.Intn(len(responseData.Results))], nil
