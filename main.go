@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,12 +40,18 @@ type result struct {
 	IncorrectAnswers []string `json:"incorrect_answers"`
 }
 
+type chatterAnswer struct {
+	user   string
+	order  int
+	answer int
+}
+
 func main() {
 	var current *result
 	var correct int
 	inProgress := false
 	timeup := false
-	players := map[string]int{}
+	players := []chatterAnswer{}
 
 	triviaClient := http.Client{Timeout: time.Second * 2}
 
@@ -71,7 +78,7 @@ func main() {
 	}
 	defer c.Close(websocket.StatusInternalError, "connection closed")
 
-	fmt.Println("Connected to chat...")
+	fmt.Printf("Connected to chat... (%s)\n", addr)
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
@@ -97,6 +104,9 @@ func main() {
 				answers := []string{current.CorrectAnswer}
 				answers = append(answers, current.IncorrectAnswers...)
 
+				rand.Seed(time.Now().UnixNano())
+				rand.Shuffle(len(answers), func(i, j int) { answers[i], answers[j] = answers[j], answers[i] })
+
 				var out string
 				for i, ans := range answers {
 					out += fmt.Sprintf("`%d` %s ", i+1, strings.ReplaceAll(html.UnescapeString(ans), "\"", "'"))
@@ -108,10 +118,8 @@ func main() {
 					}
 				}
 
-				rand.Seed(time.Now().UnixNano())
-				rand.Shuffle(len(answers), func(i, j int) { answers[i], answers[j] = answers[j], answers[i] })
 				x := fmt.Sprintf(
-					"Trivia time! (%s) Question: `%s`... Possible answers: %s (answer in 20s, whisper me the number)",
+					"Trivia time answer is in 20s, whisper me the number! (%s) Question: `%s`... Possible answers: %s",
 					current.Category, strings.Replace(html.UnescapeString(current.Question), "\"", "'", -1),
 					out,
 				)
@@ -130,42 +138,54 @@ func main() {
 			if err = json.Unmarshal([]byte(msg[1]), &content); err != nil {
 				panic(err)
 			}
+			present := false
 			user := content["nick"].(string)
-			ans, err := strconv.ParseInt(content["data"].(string), 0, 32)
-			if err != nil {
-				out := fmt.Sprintf(`PRIVMSG {"data": "Could not determine answer", "nick": %q}`, user)
-				if err = sendMessage(ctx, c, out); err != nil {
-					panic(err)
+			// check if user has already answered
+			for _, pl := range players {
+				if user == pl.user {
+					out := fmt.Sprintf(`PRIVMSG {"data": "You have already answered! Sorry.", "nick": %q}`, user)
+					if err = sendMessage(ctx, c, out); err != nil {
+						panic(err)
+					}
+					present = true
+					break
 				}
-			} else {
-				fmt.Printf("%s is playing with %d\n", user, ans)
-				players[user] = int(ans)
+			}
+
+			if !present {
+				ans, err := strconv.ParseInt(content["data"].(string), 0, 32)
+				if err != nil {
+					out := fmt.Sprintf(`PRIVMSG {"data": "Could not determine answer", "nick": %q}`, user)
+					if err = sendMessage(ctx, c, out); err != nil {
+						panic(err)
+					}
+				} else {
+					fmt.Printf("%s is playing with %d\n", user, ans)
+					players = append(players, chatterAnswer{order: len(players) + 1, answer: int(ans), user: user})
+				}
 			}
 		}
 
 		if timeup {
 			fmt.Println("Determining winner...")
-			out := fmt.Sprintf(`MSG {"data": "The correct answer is: %d %s.`, correct, current.CorrectAnswer)
-			plus := ` No one answered correctly"}`
+			out := fmt.Sprintf(`MSG {"data": "The correct answer is: %d %s. `, correct, strings.Replace(html.UnescapeString(current.CorrectAnswer), "\"", "'", -1))
+			plus := `No one answered correctly"}`
 			if len(players) > 0 {
-				for user, ans := range players {
-					if ans == correct {
-						plus := fmt.Sprintf(`%s won this round"}`, user)
-						if err = sendMessage(ctx, c, out+plus); err != nil {
-							panic(err)
-						}
+				sort.Slice(players, func(i, j int) bool {
+					return players[i].order < players[j].order
+				})
+				for _, ans := range players {
+					if ans.answer == correct {
+						plus = fmt.Sprintf(`%s won this round"}`, ans.user)
 						break
 					}
 				}
-				if err = sendMessage(ctx, c, out+plus); err != nil {
-					panic(err)
-				}
-			} else {
-				if err = sendMessage(ctx, c, out+plus); err != nil {
-					panic(err)
-				}
+			}
+			if err = sendMessage(ctx, c, out+plus); err != nil {
+				panic(err)
 			}
 			timeup = false
+			players = nil
 		}
 	}
 }
