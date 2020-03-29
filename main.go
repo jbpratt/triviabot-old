@@ -20,7 +20,7 @@ import (
 	"nhooyr.io/websocket"
 )
 
-const addr = "wss://chat.strims.gg/ws"
+const addr = "wss://chat2.strims.gg/ws"
 
 // TODO: query param
 var (
@@ -54,7 +54,6 @@ func main() {
 	var start time.Time
 
 	inProgress := false
-	timeup := false
 	players := []chatterAnswer{}
 
 	jwt := os.Getenv("STRIMS_TOKEN")
@@ -132,9 +131,27 @@ func main() {
 				go func() {
 					fmt.Println("sleeping")
 					time.Sleep(20 * time.Second)
+					fmt.Println("Determining winner...")
+					out := fmt.Sprintf(`MSG {"data": "The correct answer is: %d %s. `, correct, strings.Replace(html.UnescapeString(current.CorrectAnswer), "\"", "'", -1))
+					plus := `No one answered correctly PepeLaugh"}`
+					if len(players) > 0 {
+						sort.Slice(players, func(i, j int) bool {
+							return players[i].order < players[j].order
+						})
+						for _, ans := range players {
+							if ans.answer == correct {
+								// award points based on duration, player count, question difficulty
+								plus = fmt.Sprintf(`%s won this round. They answered in %s"}`, ans.user, ans.dur.String())
+								break
+							}
+						}
+					}
+
+					if err = sendMessage(ctx, c, out+plus); err != nil {
+						log.Fatal(err)
+					}
 					inProgress = false
-					timeup = true
-					fmt.Println("timeup")
+					players = nil
 				}()
 			}
 		} else if msg[0] == "PRIVMSG" && inProgress {
@@ -173,30 +190,6 @@ func main() {
 					})
 				}
 			}
-		}
-
-		if timeup {
-			fmt.Println("Determining winner...")
-			out := fmt.Sprintf(`MSG {"data": "The correct answer is: %d %s. `, correct, strings.Replace(html.UnescapeString(current.CorrectAnswer), "\"", "'", -1))
-			plus := `No one answered correctly PepeLaugh"}`
-			if len(players) > 0 {
-				sort.Slice(players, func(i, j int) bool {
-					return players[i].order < players[j].order
-				})
-				for _, ans := range players {
-					if ans.answer == correct {
-						// award points based on duration, player count, question difficulty
-						plus = fmt.Sprintf(`%s won this round. They answered in %s"}`, ans.user, ans.dur.String())
-						break
-					}
-				}
-			}
-
-			if err = sendMessage(ctx, c, out+plus); err != nil {
-				log.Fatal(err)
-			}
-			timeup = false
-			players = nil
 		}
 	}
 }
